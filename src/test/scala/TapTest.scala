@@ -41,18 +41,19 @@ class TapTest extends WordSpecLike with DefaultRuntime with Matchers {
         val results = unsafeRun(for {
           tap <- Tap.make(Percentage(2), (_: Throwable) => true, RejectByTap)
           service <- UIO(new EvilService)
-          results <- ZIO.foreach(Iterable.range(1, 100)) {
+          results <- ZIO.foreachPar(Iterable.range(1, 100)) {
             _ =>
               tap(service.request()).fold(Left(_), Right(_))
           }
         } yield results)
 
         results.head.left.get shouldBe a[ServiceFailure.type]
-        println(results.length)
         results.tail.nonEmpty shouldBe true
         results.tail.forall{
           case Left(RejectByTap) => true
-          case _ => false } shouldBe true
+          case Left(ServiceFailure) => true
+          case _ => false
+        } shouldBe true
       }
     }
   }
