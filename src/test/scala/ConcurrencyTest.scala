@@ -9,39 +9,52 @@ import scalaz.zio.{DefaultRuntime, UIO, ZIO}
 
 import scala.concurrent.ExecutionContext
 
+final case class QueryResult()
+
+final case class MockDbAccess(dur: Duration) {
+  def query: ZIO[Clock, Nothing, QueryResult] = for {
+    _ <- sleep(dur)
+  } yield QueryResult()
+}
+
+object MockDbAccess {
+  val slowDBAccess: UIO[MockDbAccess] = UIO.effectTotal(new MockDbAccess(Duration(2000, TimeUnit.MICROSECONDS)))
+}
+
 final case class Response()
 
-final case class ControlledApiService(dur: Duration) {
+final case class MockApiService(dur: Duration) {
   def request: ZIO[Clock, Nothing, Response] = for {
     _ <- sleep(dur)
   } yield Response()
 }
 
-object ControlledApiService {
-  val slowApiService = new ControlledApiService(Duration(1000, TimeUnit.MILLISECONDS))
-  val fastApiService = new ControlledApiService(Duration(100, TimeUnit.MILLISECONDS))
+object MockApiService {
+  val slowApiService: UIO[MockApiService] = UIO.effectTotal(new MockApiService(Duration(1000, TimeUnit.MILLISECONDS)))
+  val fastApiService: UIO[MockApiService] = UIO.effectTotal(new MockApiService(Duration(100, TimeUnit.MILLISECONDS)))
 }
 
 class ConcurrencyTest extends WordSpecLike with Matchers with DefaultRuntime {
 
-  import ControlledApiService._
+  import MockApiService._
+  import MockDbAccess._
 
   "race" should {
-    "interrupt slower effect" in {
+    "return faster result of two effects" in {
       unsafeRun(for {
-        never <- UIO(ControlledApiService(Duration(Long.MaxValue, TimeUnit.MILLISECONDS)))
-        fast <- UIO(fastApiService)
-        foreverOrFast <- never.request.race(fast.request)
-      } yield foreverOrFast) shouldBe a[Response]
+        slow <- slowApiService
+        fast <- fastApiService
+        slowOrFast <- slow.request.race(fast.request)
+      } yield slowOrFast) shouldBe a[Response]
     }
   }
 
   "raceEither" should {
-    "return fastest result among two effects" in {
+    "return the faster result among two effects" in {
       unsafeRun(for {
-        slow <- UIO(slowApiService)
-        fast <- UIO(fastApiService)
-        slowOrFast <- slow.request.raceEither(fast.request)
+        slow <- slowDBAccess
+        fast <- fastApiService
+        slowOrFast <- slow.query.raceEither(fast.request)
       } yield slowOrFast) shouldBe a[Right[_, _]]
     }
   }
@@ -50,8 +63,8 @@ class ConcurrencyTest extends WordSpecLike with Matchers with DefaultRuntime {
   "zip" should {
     "return both results" in {
       unsafeRun(for {
-        slow <- UIO(slowApiService)
-        fast <- UIO(fastApiService)
+        slow <- slowApiService
+        fast <- fastApiService
         both <- slow.request.zip(fast.request)
       } yield both) shouldBe a[(_, _)]
     }
@@ -59,26 +72,24 @@ class ConcurrencyTest extends WordSpecLike with Matchers with DefaultRuntime {
 
   "zip/zipPar" should {
     "execute effects in sequence/parallel" in {
-      val s1IO = UIO(ControlledApiService(Duration(100, TimeUnit.MILLISECONDS)))
-      val s2IO = UIO(ControlledApiService(Duration(120, TimeUnit.MILLISECONDS)))
+      val serviceIO = UIO(MockApiService(Duration(100, TimeUnit.MILLISECONDS)))
+      val deadline = UIO(()).delay(Duration(120, TimeUnit.MILLISECONDS))
 
       unsafeRun(
         for {
-          s1 <- s1IO
-          s2 <- s2IO
-          s1TwiceInSequence = s1.request.zip(s1.request)
-          result <- s1TwiceInSequence.raceEither(s2.request)
+          service <- serviceIO
+          serviceCallTwiceInSequence = service.request.zip(service.request)
+          result <- serviceCallTwiceInSequence.raceEither(deadline)
         } yield result
-      ) shouldBe a[Right[_, _]] // s1 twice in sequence should be executed in about 200 msec.
+      ) shouldBe a[Right[_, _]] // service call twice in sequence should be executed in about 200 msec.
 
       unsafeRun(
         for {
-          s1 <- s1IO
-          s2 <- s2IO
-          s1TwiceInParallel = s1.request.zipPar(s1.request)
-          result <- s1TwiceInParallel.raceEither(s2.request)
+          service <- serviceIO
+          serviceCallTwiceInParallel = service.request.zipPar(service.request)
+          result <- serviceCallTwiceInParallel.raceEither(deadline)
         } yield result
-      ) shouldBe a[Left[_, _]] // s1 twice in parallel should be executed in about 100 msec.
+      ) shouldBe a[Left[_, _]] // service call twice in parallel should be executed in about 100 msec.
     }
   }
 
