@@ -1,7 +1,7 @@
 import java.util.concurrent._
 
 import org.scalatest.{Matchers, WordSpecLike}
-import scalaz.zio.blocking._
+import scalaz.zio.blocking.{blocking, _}
 import scalaz.zio.clock.{Clock, _}
 import scalaz.zio.duration.Duration
 import scalaz.zio.internal.Executor
@@ -18,7 +18,7 @@ final case class MockDbAccess(dur: Duration) {
 }
 
 object MockDbAccess {
-  val slowDBAccess: UIO[MockDbAccess] = UIO.effectTotal(new MockDbAccess(Duration(2000, TimeUnit.MICROSECONDS)))
+  val slowDBAccess: UIO[MockDbAccess] = UIO.effectTotal(new MockDbAccess(Duration(2000, TimeUnit.MILLISECONDS)))
 }
 
 final case class Response()
@@ -123,18 +123,27 @@ class ConcurrencyTest extends WordSpecLike with Matchers with DefaultRuntime {
   "blocking" should {
     "execute an effect on the blocking thread pool" in {
       unsafeRun(for {
-        slept <- UIO(()).delay(Duration(10, TimeUnit.MILLISECONDS))
-          .raceEither(blocking(ZIO.effect(java.lang.Thread.sleep(10000L)))) // java.lang.Thread.sleepはブロッキング
-      } yield slept) shouldBe a[Left[_, _]]
+        _ <- blocking(ZIO.effect(java.lang.Thread.sleep(10000L))) // java.lang.Thread.sleepはブロッキング
+      } yield ()) shouldBe ()
     }
   }
 
   "interruptible" should {
     "make a blocking task interruptible" in {
       unsafeRun(for {
-        slept <- UIO(()).delay(Duration(10, TimeUnit.MILLISECONDS))
-          .raceEither(interruptible(java.lang.Thread.sleep(10000L)))
-      } yield slept) shouldBe a[Left[_, _]]
+        _ <- interruptible(java.lang.Thread.sleep(10000L))
+      } yield ()) shouldBe ()
+    }
+  }
+
+  "interruptible" should {
+    "make a blocking task interruptible while blocking does not" in {
+      val withBlocking = UIO(()).delay(Duration(10, TimeUnit.MILLISECONDS)).raceEither(blocking(ZIO.effect(java.lang.Thread.sleep(10000L)))).void
+      val withInterruptible = UIO(()).delay(Duration(100, TimeUnit.MILLISECONDS)).raceEither(interruptible(java.lang.Thread.sleep(15000L))).void
+
+      unsafeRun(for {
+        raceResult <- withBlocking.raceEither(withInterruptible)
+      } yield raceResult) shouldBe a[Right[_, _]]
     }
   }
 }
